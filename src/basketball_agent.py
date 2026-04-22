@@ -157,3 +157,37 @@ class NBAScraper:
         self.session = requests.Session()
         self.session.headers.update(NBA_STATS_HEADERS)
         self._team_id_map: dict[str, int] = {}
+
+ #Team ID lookup 
+    def fetch_team_ids(self) -> dict[str, int]:
+        """Return {team_abbreviation: team_id} from NBA Stats API."""
+
+        #if the map has already been fetched, return the cached version, instead of making another network request.
+        if self._team_id_map:
+            return self._team_id_map
+
+        try:
+            #makes a get request to the NBA stats API to fetch teams endpoint
+            r = self.session.get(self.TEAMS_URL, timeout=10)
+            #raise an exception if the HTTP response fails (4xx/5xx)
+            r.raise_for_status()
+            #parse the JSON response body  
+
+            data = r.json()
+            headers = data["resultSets"][0]["headers"]
+            rows    = data["resultSets"][0]["rowSet"]
+            abbr_idx = headers.index("ABBREVIATION")
+            #finds which column index holds the team abbreviation 
+            id_idx   = headers.index("TEAM_ID")
+            #finds which column index holds the numberic team ID 
+            self._team_id_map = {row[abbr_idx]: row[id_idx] for row in rows}
+        except Exception:
+            # Fallback: common team IDs hard-coded
+            self._team_id_map = {
+                "LAL": 1610612747, "BOS": 1610612738, "GSW": 1610612744,
+                "MIA": 1610612748, "DEN": 1610612743, "MIL": 1610612749,
+                "PHX": 1610612756, "DAL": 1610612742, "BKN": 1610612751,
+                "NYK": 1610612752, "PHI": 1610612755, "CLE": 1610612739,
+                "OKC": 1610612760, "MIN": 1610612750, "SAC": 1610612758,
+            }
+        return self._team_id_map
