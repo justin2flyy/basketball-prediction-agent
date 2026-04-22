@@ -240,3 +240,85 @@ class NBAScraper:
 
             except Exception:
                 pass  # fall through to synthetic data
+
+
+ # Synthetic fallback (realistic distributions) 
+        return self._synthetic_game_log(team_abbr)
+
+    def _synthetic_game_log(self, team_abbr: str) -> list[dict]:
+        """Generate realistic synthetic game history when API is unavailable."""
+        # Seed the RNG from the team abbreviation so the fallback is repeatable
+        # for a given team instead of changing on every run.
+        rng      = np.random.default_rng(abs(hash(team_abbr)) % (2**31))
+        # Give each team a slightly different scoring baseline to keep the
+        # synthetic logs from looking identical across franchises.
+        base_ppg = rng.integers(108, 122)
+        games    = []
+        # Start from opening night and move forward through a full season.
+        date     = datetime.datetime(2023, 10, 24)
+
+        for i in range(82):
+            # Simulate a normal NBA rest pattern: 1-4 days between games,
+            # with a default 3-day rest before the first game.
+            rest      = rng.integers(1, 5) if i > 0 else 3
+            home      = bool(rng.integers(0, 2))
+            # Home teams get a small scoring bump; game-to-game variation comes
+            # from a normal distribution around the team's baseline offense.
+            pts_for   = int(rng.normal(base_ppg + (2 if home else -1), 8))
+            # Opponent scoring is also sampled around a similar baseline, but
+            # shifted slightly to create stronger and weaker matchups.
+            pts_ag    = int(rng.normal(base_ppg - rng.integers(-3, 6), 8))
+            date     += datetime.timedelta(days=int(rest))
+            games.append({
+                "date":        date,
+                "home":        home,
+                # Clamp extreme low scores so the synthetic data stays within a
+                # believable modern NBA range.
+                "pts_for":     max(85, pts_for),
+                "pts_against": max(85, pts_ag),
+                "win":         pts_for > pts_ag,
+                "rest_days":   min(int(rest), 7),
+                # Add a few box-score style stats using league-ish averages.
+                "fg_pct":      round(float(rng.normal(0.46, 0.03)), 3),
+                "fg3_pct":     round(float(rng.normal(0.36, 0.04)), 3),
+                "reb":         int(rng.normal(43, 4)),
+                "ast":         int(rng.normal(24, 3)),
+                "tov":         int(rng.normal(13, 2)),
+            })
+        return games
+
+
+         #Injury report scraper 
+    def fetch_injuries(self) -> dict[str, list[str]]:
+        """
+        Scrapes ESPN injury page. Returns {team_name: [player_status, ...]}
+        Falls back to empty dict on failure.
+        """
+        try:
+            #actual request for the espn injury page 
+            r    = self.session.get(self.ESPN_INJURIES_URL, timeout=10)
+            r.raise_for_status()
+            #parses the HTML so we can search it with CSS selectors 
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            injuries: dict[str, list[str]] = {}
+            for section in soup.select(".TableBase"):
+                #find the team name shown above the table
+                team_el = section.select_one(".injuries__teamName")
+                if not team_el:
+                    #skip if it does not contain a team header
+                    continue
+                team = team_el.get_text(strip=True)
+                players = []
+                #walk through each player row in the injury table 
+                for row in section.select("tbody tr"):
+                    cols = row.select("td")
+                    if len(cols) >= 4:
+                        name   = cols[0].get_text(strip=True)
+                        status = cols[3].get_text(strip=True)
+                        players.append(f"{name} ({status})")
+                if players:
+                    injuries[team] = players
+            return injuries
+        except Exception:
+            return {}
