@@ -191,3 +191,52 @@ class NBAScraper:
                 "OKC": 1610612760, "MIN": 1610612750, "SAC": 1610612758,
             }
         return self._team_id_map
+
+
+ # Game log scraper 
+    def fetch_game_log(self, team_abbr: str, season: str = "2023-24") -> list[dict]:
+        """
+        Returns a list of game dicts with keys:
+          date, home, pts_for, pts_against, win, rest_days
+        """
+        #get the full abbreviation to ID map, then look up the specific team. 
+        team_ids = self.fetch_team_ids()
+        team_id  = team_ids.get(team_abbr.upper()) # the .upper() handles lowercase input 
+
+        #only proceed if the team abbreviation was recognized. 
+        if team_id:
+            try:
+                #build the URL by injecting the season string and numeric team ID
+                url = self.GAME_LOG_URL.format(season=season, team_id=team_id)
+                r   = self.session.get(url, timeout=12)]
+                #raise an exception if the HTTP response fails (4xx/5xx)
+                r.raise_for_status()
+                data    = r.json()
+                headers = data["resultSets"][0]["headers"]
+                rows    = data["resultSets"][0]["rowSet"]
+
+                games = []
+                prev_date = None
+                for row in reversed(rows):   # oldest → newest
+                    g = dict(zip(headers, row))
+                    game_date = datetime.datetime.strptime(g["GAME_DATE"], "%Y-%m-%dT%H:%M:%S")
+                    rest      = (game_date - prev_date).days if prev_date else 3
+                    prev_date = game_date
+                    games.append({
+                        "date":        game_date,
+                        "home":        "vs." in g.get("MATCHUP", ""),
+                        "pts_for":     g["PTS"],
+                        "pts_against": g["PTS"] - g["PLUS_MINUS"],
+                        "win":         g["WL"] == "W",
+                        "rest_days":   min(rest, 7),
+                        "fg_pct":      g.get("FG_PCT", 0.45),
+                        "fg3_pct":     g.get("FG3_PCT", 0.35),
+                        "reb":         g.get("REB", 43),
+                        "ast":         g.get("AST", 24),
+                        "tov":         g.get("TOV", 13),
+                    })
+                    #field goal percent, 3 point percent, rebounds, assists, and turnovers. 
+                return games
+
+            except Exception:
+                pass  # fall through to synthetic data
