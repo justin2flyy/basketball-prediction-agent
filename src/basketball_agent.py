@@ -199,17 +199,17 @@ class NBAScraper:
         Returns a list of game dicts with keys:
           date, home, pts_for, pts_against, win, rest_days
         """
-        #get the full abbreviation to ID map, then look up the specific team. 
+        #Get the full abbreviation to ID map, then look up the specific team. 
         team_ids = self.fetch_team_ids()
         team_id  = team_ids.get(team_abbr.upper()) # the .upper() handles lowercase input 
 
-        #only proceed if the team abbreviation was recognized. 
+        #Only proceed if the team abbreviation was recognized. 
         if team_id:
             try:
-                #build the URL by injecting the season string and numeric team ID
+                #Build the URL by injecting the season string and numeric team ID
                 url = self.GAME_LOG_URL.format(season=season, team_id=team_id)
                 r   = self.session.get(url, timeout=12)]
-                #raise an exception if the HTTP response fails (4xx/5xx)
+                #Raise an exception if the HTTP response fails (4xx/5xx)
                 r.raise_for_status()
                 data    = r.json()
                 headers = data["resultSets"][0]["headers"]
@@ -235,11 +235,11 @@ class NBAScraper:
                         "ast":         g.get("AST", 24),
                         "tov":         g.get("TOV", 13),
                     })
-                    #field goal percent, 3 point percent, rebounds, assists, and turnovers. 
+                    #Field goal percent, 3 point percent, rebounds, assists, and turnovers. 
                 return games
 
             except Exception:
-                pass  # fall through to synthetic data
+                pass  # Fall through to synthetic data
 
 
  # Synthetic fallback (realistic distributions) 
@@ -295,22 +295,22 @@ class NBAScraper:
         Falls back to empty dict on failure.
         """
         try:
-            #actual request for the espn injury page 
+            #Actual request for the espn injury page 
             r    = self.session.get(self.ESPN_INJURIES_URL, timeout=10)
             r.raise_for_status()
-            #parses the HTML so we can search it with CSS selectors 
+            #Parses the HTML so we can search it with CSS selectors 
             soup = BeautifulSoup(r.text, "html.parser")
 
             injuries: dict[str, list[str]] = {}
             for section in soup.select(".TableBase"):
-                #find the team name shown above the table
+                #Find the team name shown above the table
                 team_el = section.select_one(".injuries__teamName")
                 if not team_el:
-                    #skip if it does not contain a team header
+                    #Skip if it does not contain a team header
                     continue
                 team = team_el.get_text(strip=True)
                 players = []
-                #walk through each player row in the injury table 
+                #Walk through each player row in the injury table 
                 for row in section.select("tbody tr"):
                     cols = row.select("td")
                     if len(cols) >= 4:
@@ -322,3 +322,340 @@ class NBAScraper:
             return injuries
         except Exception:
             return {}
+            
+# FEATURE ENGINEERING
+def compute_team_features(games: list[dict], elo: float, injuries: list[str]) -> dict:
+    """
+    From a team's game log, compute all ML features for one team side:
+      - avg_pts_last10, avg_pts_against_last10
+      - win_pct_last10
+      - avg_rest_days
+      - home_win_pct, away_win_pct
+      - elo_rating
+      - injury_count
+      - avg_fg_pct, avg_fg3_pct, avg_reb, avg_ast, avg_tov (last 10)
+    """
+    # Use only the most recent 10 games for recency-weighted stats;
+    # fall back to all games if fewer than 10 are available
+    last10  = games[-10:] if len(games) >= 10 else games
+
+    # Split the full game log into home and away subsets for split-record features
+    home_g  = [g for g in games if g["home"]]
+    away_g  = [g for g in games if not g["home"]]
+
+    # Returns the mean of a numeric field across a list of game dicts,
+    # or 0.0 if the list is empty (avoids ZeroDivisionError)
+    def safe_mean(lst, key):
+        return float(np.mean([g[key] for g in lst])) if lst else 0.0
+
+    # Returns the fraction of games won in a subset; 0.0 if subset is empty
+    def win_pct(subset):
+        return float(np.mean([g["win"] for g in subset])) if subset else 0.0
+
+    return {
+        # Offensive output and defensive exposure over the last 10 games
+        "avg_pts_last10":      safe_mean(last10, "pts_for"),
+        "avg_pts_ag_last10":   safe_mean(last10, "pts_against"),
+
+        # How often the team won over their last 10 games (0.0 – 1.0)
+        "win_pct_last10":      win_pct(last10),
+
+        # Average days of rest between games — more rest can mean fresher legs
+        "avg_rest_days":       safe_mean(last10, "rest_days"),
+
+        # Win rates split by venue — captures home-court advantage effects
+        "home_win_pct":        win_pct(home_g),
+        "away_win_pct":        win_pct(away_g),
+
+        # Current ELO rating — a running power-ranking score for the team
+        "elo_rating":          elo,
+
+        # Number of players currently listed as injured
+        "injury_count":        len(injuries),
+
+        # Shooting efficiency and box-score averages over the last 10 games
+        "avg_fg_pct":          safe_mean(last10, "fg_pct"),   # field-goal %
+        "avg_fg3_pct":         safe_mean(last10, "fg3_pct"),  # three-point %
+        "avg_reb":             safe_mean(last10, "reb"),       # rebounds
+        "avg_ast":             safe_mean(last10, "ast"),       # assists
+        "avg_tov":             safe_mean(last10, "tov"),       # turnovers
+    }
+
+
+def build_matchup_features(home_feats: dict, away_feats: dict, home_elo_wp: float) -> np.ndarray:
+    """
+    Combines home and away features into a single feature vector
+    by computing differentials (home - away) plus ELO win probability.
+    """
+    # These keys exist in both home_feats and away_feats; subtracting
+    # away from home turns two team-level dicts into one relative vector
+    # that the model can learn from directly
+    diff_keys = [
+        "avg_pts_last10", "avg_pts_ag_last10", "win_pct_last10",
+        "avg_rest_days",  "home_win_pct",       "away_win_pct",
+        "elo_rating",     "avg_fg_pct",          "avg_fg3_pct",
+        "avg_reb",        "avg_ast",             "avg_tov",
+    ]
+
+    # Build a list of (home - away) differentials for every shared feature
+    diffs = [home_feats[k] - away_feats[k] for k in diff_keys]
+
+    # Append the ELO-derived win probability for the home team (0.0 – 1.0)
+    diffs.append(home_elo_wp)
+
+    # Append raw injury counts for each side — kept separate rather than
+    # differenced so the model can detect asymmetric injury burdens
+    diffs.append(float(home_feats["injury_count"]))
+    diffs.append(float(away_feats["injury_count"]))
+
+    # Return as a 1-D float array ready to be passed to the scaler / model
+    return np.array(diffs, dtype=float)
+
+
+# Human-readable names for each position in the feature vector produced by
+# build_matchup_features — used for logging, debugging, and SHAP explanations
+FEATURE_NAMES = [
+    "pts_diff_last10", "pts_ag_diff_last10", "win_pct_diff_last10",
+    "rest_diff",        "home_win_pct_diff",  "away_win_pct_diff",
+    "elo_diff",         "fg_pct_diff",         "fg3_pct_diff",
+    "reb_diff",         "ast_diff",            "tov_diff",
+    "elo_win_prob",     "home_injuries",        "away_injuries",
+]
+
+
+# 
+# ML MODEL
+# 
+class NBAPredictor:
+    """
+    Supervised ML pipeline:
+      1. Generate synthetic historical seasons for training
+      2. Train calibrated Logistic Regression
+      3. Evaluate: Accuracy, Log Loss, AUC-ROC, Brier Score, Calibration
+      4. Backtest on held-out season
+      5. Predict new matchups
+    """
+
+    def __init__(self):
+        # Standardize features before model fitting/prediction
+        self.scaler     = StandardScaler()
+
+        # Base classifier used inside probability calibration
+        self.base_model = LogisticRegression(max_iter=1000, C=1.0, random_state=42)
+
+        # Isotonic calibration improves probability reliability
+        self.model      = CalibratedClassifierCV(self.base_model, cv=5, method="isotonic")
+
+        # Helpers for dynamic strength rating and data collection
+        self.elo        = EloSystem()
+        self.scraper    = NBAScraper()
+
+        # Training/evaluation state
+        self.is_trained = False
+        self.metrics: dict = {}
+
+    # ── Training data generation ────────────────────────────
+    def _generate_training_data(self, n_seasons: int = 5) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Builds a training dataset by simulating n_seasons of 30-team NBA schedules.
+        Each row = one game's feature vector; label = 1 if home team won.
+        """
+        team_abbrs = [
+            "LAL","BOS","GSW","MIA","DEN","MIL","PHX","DAL","BKN","NYK",
+            "PHI","CLE","OKC","MIN","SAC","ATL","CHI","HOU","IND","MEM",
+            "NOP","ORL","POR","SAS","TOR","UTA","WAS","CHA","DET","LAC",
+        ]
+
+        X_list, y_list = [], []
+
+        for season_offset in range(n_seasons):
+            # Fresh game logs per team per season
+            team_logs: dict[str, list[dict]] = {
+                t: self.scraper._synthetic_game_log(f"{t}_{season_offset}")
+                for t in team_abbrs
+            }
+            # Reset ELO each season (with slight regression to mean)
+            for t in team_abbrs:
+                prev = self.elo.get(t)
+                self.elo.ratings[t] = EloSystem.DEFAULT_ELO * 0.25 + prev * 0.75
+
+            # Simulate ~1230 games per season
+            rng = np.random.default_rng(season_offset)
+            teams_shuffled = team_abbrs.copy()
+
+            for game_idx in range(1230):
+                # Randomly pair teams for a synthetic game
+                rng.shuffle(teams_shuffled)
+                home_t = teams_shuffled[0]
+                away_t = teams_shuffled[1]
+
+                inj_h = []  # no per-game injury simulation in training
+                inj_a = []
+
+                # Build side-specific features, then combine into one matchup vector
+                h_feats  = compute_team_features(team_logs[home_t], self.elo.get(home_t), inj_h)
+                a_feats  = compute_team_features(team_logs[away_t], self.elo.get(away_t), inj_a)
+                elo_wp   = self.elo.win_probability(home_t, away_t)
+                x_vec    = build_matchup_features(h_feats, a_feats, elo_wp)
+
+                # Determine outcome using ELO probability
+                home_wins = bool(rng.random() < elo_wp)
+                winner    = home_t if home_wins else away_t
+                loser     = away_t if home_wins else home_t
+                self.elo.update(winner, loser, home_t)
+
+                # Sample plausible scores around recent offensive averages
+                pts_h = int(rng.normal(h_feats["avg_pts_last10"], 8))
+                pts_a = int(rng.normal(a_feats["avg_pts_last10"], 8))
+
+                # Enforce no ties by nudging the winner above the loser
+                if home_wins:
+                    pts_h = max(pts_h, pts_a + 1)
+                else:
+                    pts_a = max(pts_a, pts_h + 1)
+
+                # Feed the simulated game back into team logs so future features
+                # evolve over the season
+                team_logs[home_t].append({
+                    "date": datetime.datetime.now(), "home": True,
+                    "pts_for": pts_h, "pts_against": pts_a,
+                    "win": home_wins, "rest_days": int(rng.integers(1, 5)),
+                    "fg_pct": 0.46, "fg3_pct": 0.36,
+                    "reb": 43, "ast": 24, "tov": 13,
+                })
+                team_logs[away_t].append({
+                    "date": datetime.datetime.now(), "home": False,
+                    "pts_for": pts_a, "pts_against": pts_h,
+                    "win": not home_wins, "rest_days": int(rng.integers(1, 5)),
+                    "fg_pct": 0.46, "fg3_pct": 0.36,
+                    "reb": 43, "ast": 24, "tov": 13,
+                })
+
+                # Collect final training row and binary label
+                X_list.append(x_vec)
+                y_list.append(int(home_wins))
+
+        return np.array(X_list), np.array(y_list)
+
+    # ── Train ───────────────────────────────────────────────
+    def train(self, verbose: bool = True) -> None:
+        if verbose:
+            print("\n⚙️   Generating training data (5 simulated seasons)...")
+
+        X, y = self._generate_training_data(n_seasons=5)
+
+        # Chronological split: last 20% = backtest set
+        split      = int(len(X) * 0.80)
+        X_train, X_test = X[:split], X[split:]
+        y_train, y_test = y[:split], y[split:]
+
+        # Fit scaler only on training data to avoid leakage
+        X_train_s = self.scaler.fit_transform(X_train)
+        X_test_s  = self.scaler.transform(X_test)
+
+        if verbose:
+            print(f"   Training samples : {len(X_train):,}")
+            print(f"   Backtest samples : {len(X_test):,}")
+            print("⚙️   Fitting calibrated logistic regression...")
+
+        # Fit calibrated model and mark pipeline as usable
+        self.model.fit(X_train_s, y_train)
+        self.is_trained = True
+
+        # ── Evaluate ─────────────────────────────────────────
+        # Hard predictions + calibrated probabilities on the backtest split
+        y_pred      = self.model.predict(X_test_s)
+        y_prob      = self.model.predict_proba(X_test_s)[:, 1]
+
+        # Core classification/probability-quality metrics
+        acc         = accuracy_score(y_test, y_pred)
+        ll          = log_loss(y_test, y_prob)
+        auc         = roc_auc_score(y_test, y_prob)
+        brier       = brier_score_loss(y_test, y_prob)
+
+        # Calibration: mean absolute error between predicted & actual bins
+        prob_true, prob_pred = calibration_curve(y_test, y_prob, n_bins=10)
+        cal_error = float(np.mean(np.abs(prob_true - prob_pred)))
+
+        # Store rounded metrics for clean downstream printing/UI
+        self.metrics = {
+            "accuracy":          round(acc * 100, 2),
+            "log_loss":          round(ll,  4),
+            "auc_roc":           round(auc, 4),
+            "brier_score":       round(brier, 4),
+            "calibration_error": round(cal_error, 4),
+            "backtest_n":        len(X_test),
+        }
+
+        if verbose:
+            self._print_metrics()
+
+    def _print_metrics(self) -> None:
+        m = self.metrics
+        print(f"\n{'─'*50}")
+        print(f"  📈  MODEL EVALUATION (Backtest on held-out season)")
+        print(f"{'─'*50}")
+        print(f"  Accuracy          : {m['accuracy']}%")
+        print(f"  Log Loss          : {m['log_loss']}   (lower = better)")
+        print(f"  AUC-ROC           : {m['auc_roc']}   (1.0 = perfect)")
+        print(f"  Brier Score       : {m['brier_score']} (lower = better)")
+        print(f"  Calibration Error : {m['calibration_error']} (0 = perfect)")
+        print(f"  Backtest games    : {m['backtest_n']:,}")
+        print(f"{'─'*50}\n")
+
+    # ── Predict ─────────────────────────────────────────────
+    def predict(
+        self,
+        home_team: str,
+        away_team: str,
+        home_games: list[dict],
+        away_games: list[dict],
+        injuries:   dict[str, list[str]],
+    ) -> dict:
+        """Run prediction for a specific matchup."""
+        if not self.is_trained:
+            raise RuntimeError("Model not trained. Call .train() first.")
+
+        inj_home = injuries.get(home_team, [])
+        inj_away = injuries.get(away_team, [])
+
+        # Build current-team feature snapshots and ELO-based prior
+        h_feats = compute_team_features(home_games, self.elo.get(home_team), inj_home)
+        a_feats = compute_team_features(away_games, self.elo.get(away_team), inj_away)
+        elo_wp  = self.elo.win_probability(home_team, away_team)
+
+        # Shape/scaling to match the format the model was trained on
+        x_vec = build_matchup_features(h_feats, a_feats, elo_wp).reshape(1, -1)
+        x_s   = self.scaler.transform(x_vec)
+
+        # Binary probability for home win; away is complementary
+        home_prob = float(self.model.predict_proba(x_s)[0][1])
+        away_prob = 1.0 - home_prob
+        winner    = home_team if home_prob >= 0.5 else away_team
+
+        # Heuristic score projection combining offense and opponent defense
+        proj_home = round(h_feats["avg_pts_last10"] * 0.6 + a_feats["avg_pts_ag_last10"] * 0.4 + 2.5)
+        proj_away = round(a_feats["avg_pts_last10"] * 0.6 + h_feats["avg_pts_ag_last10"] * 0.4)
+
+        # Confidence tiers based on distance from a 50/50 coin flip
+        confidence = "High" if abs(home_prob - 0.5) > 0.15 else \
+                     "Medium" if abs(home_prob - 0.5) > 0.07 else "Low"
+
+        return {
+            "home_team":       home_team,
+            "away_team":       away_team,
+            "predicted_winner": winner,
+            "home_win_prob":   round(home_prob * 100, 1),
+            "away_win_prob":   round(away_prob * 100, 1),
+            "projected_score": f"{home_team} {proj_home} – {away_team} {proj_away}",
+            "elo_home":        round(self.elo.get(home_team), 1),
+            "elo_away":        round(self.elo.get(away_team), 1),
+            "home_injuries":   inj_home,
+            "away_injuries":   inj_away,
+            "home_features":   h_feats,
+            "away_features":   a_feats,
+            "confidence":      confidence,
+        }
+
+
+
