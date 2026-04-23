@@ -729,4 +729,145 @@ Provide a concise analysis:
 
 
 
+# MAIN PREDICTION INTERFACE
+def predict_game(
+    predictor:  NBAPredictor,
+    scraper:    NBAScraper,
+    home_abbr:  str,
+    away_abbr:  str,
+    use_ai:     bool = False,
+) -> None:
+    """
+    Orchestrates the complete prediction workflow for an NBA matchup.
+    
+    Steps:
+      1. Fetch game logs for both teams from the web scraper
+      2. Fetch current injury reports from ESPN
+      3. Run ML model prediction with collected data
+      4. Extract and display team features (offensive/defensive stats)
+      5. Show model's prediction, probability, and confidence level
+      6. Optionally run Claude AI analysis on the matchup
+    """
+
+    # Display a formatted header with the matchup (away @ home format)
+    print(f"\n{'='*58}")
+    print(f"  🏀   {away_abbr.upper()} @ {home_abbr.upper()}")
+    print(f"{'='*58}")
+
+    # ── DATA COLLECTION PHASE ──────────────────────────────────────
+    
+    # Scrape the home and away team game logs from stats.nba.com
+    # (or use synthetic data if API is unavailable/rate-limited)
+    print("  📡  Fetching game logs...")
+    home_games = scraper.fetch_game_log(home_abbr)
+    away_games = scraper.fetch_game_log(away_abbr)
+
+    # Scrape ESPN injury page to get current player availability status
+    print("  🩺  Fetching injury report...")
+    injuries   = scraper.fetch_injuries()
+
+    # ── MODEL PREDICTION PHASE ────────────────────────────────────-
+    
+    # Call the trained ML model with team data to get prediction
+    # Returns a dict containing: winner, probabilities, projected score, 
+    # computed features, ELO ratings, injuries, and confidence level
+    pred = predictor.predict(home_abbr, away_abbr, home_games, away_games, injuries)
+
+    # Extract computed features for easy reference throughout display
+    hf = pred["home_features"]  # Home team's computed features
+    af = pred["away_features"]  # Away team's computed features
+
+    # ── FEATURE SUMMARY TABLE PHASE ────────────────────────────────
+    
+    # Print header for statistical comparison table
+    print(f"\n  📊  FEATURE SUMMARY")
+    print(f"  {'Metric':<22} {'':>2} {home_abbr:<8} {away_abbr:<8}")
+    print(f"  {'─'*42}")
+    
+    # Build a list of tuples containing key statistics for side-by-side comparison
+    # Each tuple = (label, home_value, away_value) formatted as strings
+    rows = [
+        ("Avg pts (last 10)",   f"{hf['avg_pts_last10']:.1f}",   f"{af['avg_pts_last10']:.1f}"),
+        ("Avg allowed (last 10)",f"{hf['avg_pts_ag_last10']:.1f}",f"{af['avg_pts_ag_last10']:.1f}"),
+        ("Win % last 10",       f"{hf['win_pct_last10']*100:.0f}%",f"{af['win_pct_last10']*100:.0f}%"),
+        ("Avg rest days",       f"{hf['avg_rest_days']:.1f}",    f"{af['avg_rest_days']:.1f}"),
+        ("Home win %",          f"{hf['home_win_pct']*100:.0f}%",f"—"),
+        ("Away win %",          "—",                              f"{af['away_win_pct']*100:.0f}%"),
+        ("ELO rating",          str(pred['elo_home']),            str(pred['elo_away'])),
+        ("Injuries",            str(len(pred['home_injuries'])),  str(len(pred['away_injuries']))),
+    ]
+    
+    # Print each row with aligned columns for clean tabular display
+    for label, h_val, a_val in rows:
+        print(f"  {label:<24} {h_val:<10} {a_val:<10}")
+
+    # ── ML PREDICTION RESULTS PHASE ────────────────────────────────
+    
+    print(f"\n  🤖  ML PREDICTION")
+    print(f"  {'─'*42}")
+    
+    # Display the model's predicted winner (home or away team)
+    print(f"  Winner     : {pred['predicted_winner']}")
+    
+    # Show calibrated win probabilities for both teams (0-100%)
+    # These come from the isotonic-calibrated logistic regression model
+    print(f"  Probability: {pred['home_team']} {pred['home_win_prob']}%  |  {pred['away_team']} {pred['away_win_prob']}%")
+    
+    # Display projected final score (calculated from blend of team offense & opponent defense)
+    print(f"  Score est. : {pred['projected_score']}")
+    
+    # Show confidence tier based on distance from 50-50 prediction:
+    #   - High: >15% from 50% (one team heavily favored)
+    #   - Medium: 7-15% from 50% (moderate lean toward one team)
+    #   - Low: <7% from 50% (very close matchup)
+    print(f"  Confidence : {pred['confidence']}")
+
+    # ── INJURY ALERTS PHASE ────────────────────────────────────────
+    
+    # If home team has injured players, display up to 3 players with their status
+    if pred["home_injuries"]:
+        print(f"  ⚠️  {pred['home_team']} injuries: {', '.join(pred['home_injuries'][:3])}")
+    
+    # If away team has injured players, display up to 3 players with their status
+    if pred["away_injuries"]:
+        print(f"  ⚠️  {pred['away_team']} injuries: {', '.join(pred['away_injuries'][:3])}")
+
+    # ── OPTIONAL AI NARRATIVE ANALYSIS PHASE ───────────────────────
+    
+    # If AI analysis is enabled AND a valid Anthropic API key is configured,
+    # send the prediction context to Claude for a human-readable breakdown
+    if use_ai and ANTHROPIC_API_KEY != "YOUR_API_KEY_HERE":
+        print(f"\n  💬  AI ANALYSIS")
+        print(f"  {'─'*42}")
+        
+        # Call Claude API with prediction context, model metrics, and team stats
+        analysis = get_ai_analysis(pred, predictor.metrics)
+        
+        # Word-wrap the AI response at ~70 characters per line for readability
+        for line in analysis.split("\n"):
+            print(f"  {line}")
+
+    # Close the prediction output block
+    print(f"{'='*58}\n")
+
+
+
+# ENTRY POINT
+if __name__ == "__main__":
+    # 1. Initialize components
+    scraper   = NBAScraper()
+    predictor = NBAPredictor()
+
+    # 2. Train the model (generates 5 seasons of data & evaluates)
+    predictor.train(verbose=True)
+
+    # 3. Run predictions  (use team abbreviations)
+    predict_game(predictor, scraper, home_abbr="BOS", away_abbr="LAL", use_ai=False)
+    predict_game(predictor, scraper, home_abbr="DEN", away_abbr="MIA", use_ai=False)
+    predict_game(predictor, scraper, home_abbr="GSW", away_abbr="NYK", use_ai=False)
+
+    # 4. Enable AI narrative analysis (requires ANTHROPIC_API_KEY in .env)
+    # predict_game(predictor, scraper, home_abbr="BOS", away_abbr="LAL", use_ai=True)
+
+
 
