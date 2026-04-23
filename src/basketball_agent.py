@@ -28,16 +28,16 @@ from dotenv import load_dotenv
 #reads env file and loads content into program environment
 from bs4 import BeautifulSoup
 #an html parser used to scrap the espn injury page by finding
-specific elements from the webpages html
+# specific elements from the webpages html
  
 from sklearn.linear_model import LogisticRegression
 # the actual model that the agent is using
 from sklearn.preprocessing import StandardScaler
 # makes features use the same scale so that the model does not
-get confused from large differences in numbers
+# get confused from large differences in numbers
 from sklearn.model_selection import train_test_split
-# splits data into training and testing sets so you can evaluate how 
-well the model performs on games it hasnt seen
+# splits data into training and testing sets so you can evaluate how
+# well the model performs on games it hasnt seen
 from sklearn.metrics import (
     accuracy_score,
     log_loss,
@@ -208,7 +208,7 @@ class NBAScraper:
             try:
                 #Build the URL by injecting the season string and numeric team ID
                 url = self.GAME_LOG_URL.format(season=season, team_id=team_id)
-                r   = self.session.get(url, timeout=12)]
+                r   = self.session.get(url, timeout=12)
                 #Raise an exception if the HTTP response fails (4xx/5xx)
                 r.raise_for_status()
                 data    = r.json()
