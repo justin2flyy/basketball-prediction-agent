@@ -656,6 +656,77 @@ class NBAPredictor:
             "away_features":   a_feats,
             "confidence":      confidence,
         }
+# 
+# CLAUDE AI NARRATIVE ANALYSIS
+# 
+def get_ai_analysis(pred: dict, metrics: dict) -> str:
+    # Pull precomputed feature snapshots for readable prompt formatting
+    hf = pred["home_features"]
+    af = pred["away_features"]
+
+    # Build a structured analyst prompt that combines team context,
+    # model output, and backtest metrics into one narrative request
+    prompt = f"""
+You are an expert NBA analyst working with a supervised machine learning prediction system.
+
+MATCHUP: {pred['away_team']} @ {pred['home_team']}
+
+HOME — {pred['home_team']}:
+  Last-10 avg pts: {hf['avg_pts_last10']:.1f} | Allowed: {hf['avg_pts_ag_last10']:.1f}
+  Win % last 10:   {hf['win_pct_last10']*100:.0f}%
+  Home win %:      {hf['home_win_pct']*100:.0f}%
+  Avg rest days:   {hf['avg_rest_days']:.1f}
+  ELO rating:      {pred['elo_home']}
+  Injuries:        {', '.join(pred['home_injuries']) if pred['home_injuries'] else 'None'}
+  FG% / 3P%:       {hf['avg_fg_pct']*100:.1f}% / {hf['avg_fg3_pct']*100:.1f}%
+
+AWAY — {pred['away_team']}:
+  Last-10 avg pts: {af['avg_pts_last10']:.1f} | Allowed: {af['avg_pts_ag_last10']:.1f}
+  Win % last 10:   {af['win_pct_last10']*100:.0f}%
+  Away win %:      {af['away_win_pct']*100:.0f}%
+  Avg rest days:   {af['avg_rest_days']:.1f}
+  ELO rating:      {pred['elo_away']}
+  Injuries:        {', '.join(pred['away_injuries']) if pred['away_injuries'] else 'None'}
+  FG% / 3P%:       {af['avg_fg_pct']*100:.1f}% / {af['avg_fg3_pct']*100:.1f}%
+
+ML MODEL OUTPUT:
+  Predicted winner : {pred['predicted_winner']}
+  Win probabilities: {pred['home_team']} {pred['home_win_prob']}% | {pred['away_team']} {pred['away_win_prob']}%
+  Projected score  : {pred['projected_score']}
+  Confidence level : {pred['confidence']}
+
+MODEL PERFORMANCE (backtesting):
+  Accuracy {metrics.get('accuracy')}% | Log Loss {metrics.get('log_loss')} | AUC-ROC {metrics.get('auc_roc')}
+
+Provide a concise analysis:
+1. Game breakdown (2-3 sentences)
+2. The single most important deciding factor
+3. Final prediction with confidence level and why
+"""
+
+    # Anthropic API request headers
+    headers = {
+        "x-api-key":             ANTHROPIC_API_KEY,
+        "anthropic-version":     "2023-06-01",
+        "content-type":          "application/json",
+    }
+
+    # Request payload for the Messages API
+    payload = {
+        "model":      MODEL,
+        "max_tokens": 1000,
+        "messages":   [{"role": "user", "content": prompt}],
+    }
+
+    try:
+        # Send prompt to Claude and return generated narrative text
+        r = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=30)
+        r.raise_for_status()
+        return r.json()["content"][0]["text"]
+    except Exception as e:
+        # Graceful fallback when API key/network/request parsing fails
+        return f"[AI analysis unavailable: {e}]"
+
 
 
 
