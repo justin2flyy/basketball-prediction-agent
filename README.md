@@ -23,6 +23,55 @@ The model constructs a **15-dimensional matchup feature vector** from the follow
 | ELO rating | Continuously updated team strength rating |
 | Active injury count | Proxy for current roster availability |
  
-Home-minus-away differentials are computed for each feature, then combined with the ELO-derived win probability and raw injury counts for each side.
+Home-minus-away differentials are computed for each feature, then combined with the ELO derived win probability and raw injury counts for each side.
  
 ---
+
+## Results
+
+On a backtest of **1,230 games**:
+
+| Metric | Score | Notes |
+|---|---|---|
+| Accuracy | **69.4%** | Random baseline = 50% |
+| Log Loss | **0.613** | Random baseline = 0.693 |
+| AUC-ROC | **0.733** | Random baseline = 0.500 |
+| Brier Score | **0.201** | Lower is better |
+| Calibration Error | **0.073** | 0 = perfectly calibrated |
+
+
+## Setup & Installation
+ 
+### Requirements
+ 
+- Python 3.12
+- No GPU required — all computation runs on CPU in under 30 seconds
+### Install Dependencies
+ 
+```bash
+pip install -r requirements.txt
+```
+ 
+### Environment Configuration
+ 
+Create a `.env` file in the project root if any API keys or configuration values are needed:
+ 
+```
+# .env
+# Add any required environment variables here
+```
+ 
+### Run
+ 
+```bash
+python src/basketball_agent.py
+```
+ 
+---
+
+
+
+
+
+
+
